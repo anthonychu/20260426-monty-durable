@@ -1,33 +1,21 @@
+# when_all fan-out/fan-in scenarios
+#
+# Prereqs:
+# 1. Start Azurite and the Durable Task Scheduler emulator.
+# 2. Start the Functions host from this workspace: `source .venv/bin/activate && func start`.
+# 3. For Azure REST scenarios, run `az login` and make sure `@subscriptionId` is set below.
+#
+# `when_all` is implemented in the Monty prelude with `asyncio.gather`.
+# The bridge sees the pending Monty futures and yields Durable `task_all` under the hood.
+
 @baseUrl = http://localhost:7071
 @orchestrator = monty_orchestrator
 @subscriptionId = ef6e1243-d48a-417e-8e6d-40cd96e110fd
 
-### Start: pure Monty code
-# @name startPure
-POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
-Content-Type: application/json
-
-{
-  "code": "1 + 2"
-}
-
-### Status: pure Monty code
-GET {{startPure.response.body.statusQueryGetUri}}
-
-### Start: await call_activity("echo", ...)
-# @name startEcho
-POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
-Content-Type: application/json
-
-{
-  "code": "result = await call_activity(\"echo\", {\"hello\": \"durable\"})\nresult"
-}
-
-### Status: echo activity
-GET {{startEcho.response.body.statusQueryGetUri}}
-
-### Start: when_all fan-out/fan-in
-# @name startWhenAll
+### Start: local echo fan-out/fan-in
+# Run this first if you want a no-Azure smoke test.
+# It schedules three local `echo` activities and waits for all of them.
+# @name startWhenAllEcho
 POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
 Content-Type: application/json
 
@@ -35,34 +23,14 @@ Content-Type: application/json
   "code": "tasks = [call_activity(\"echo\", {\"i\": 1}), call_activity(\"echo\", {\"i\": 2}), call_activity(\"echo\", {\"i\": 3})]\nresults = await when_all(tasks)\nresults"
 }
 
-### Status: when_all fan-out/fan-in
-GET {{startWhenAll.response.body.statusQueryGetUri}}
-
-### Start: when_any activity specs
-# @name startWhenAny
-POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
-Content-Type: application/json
-
-{
-  "code": "winner = await when_any([{\"activity\": \"echo\", \"input\": {\"i\": 1}}, {\"activity\": \"echo\", \"input\": {\"i\": 2}}])\nwinner"
-}
-
-### Status: when_any activity specs
-GET {{startWhenAny.response.body.statusQueryGetUri}}
-
-### Start: rejected activity smoke test
-# @name startRejectedActivity
-POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
-Content-Type: application/json
-
-{
-  "code": "await call_activity(\"not_allowed\", {})"
-}
-
-### Status: rejected activity smoke test
-GET {{startRejectedActivity.response.body.statusQueryGetUri}}
+### Status: local echo fan-out/fan-in
+# Run after `Start: local echo fan-out/fan-in`.
+# Expected: output.output is the three echo payloads and metadata.scheduledActivities is 3.
+GET {{startWhenAllEcho.response.body.statusQueryGetUri}}
 
 ### Start: Azure REST list Function Apps
+# Run this after Azure auth is configured.
+# It uses the read-only `azure_rest` activity to list Function App resources in the subscription.
 # @name startListFunctionApps
 POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
 Content-Type: application/json
@@ -72,9 +40,13 @@ Content-Type: application/json
 }
 
 ### Status: Azure REST list Function Apps
+# Run after `Start: Azure REST list Function Apps`.
+# Expected: output.output is an array of Function App summaries.
 GET {{startListFunctionApps.response.body.statusQueryGetUri}}
 
 ### Start: Azure REST Function Apps detail fan-out
+# Run this after Azure auth is configured.
+# It lists Function Apps, creates one detail activity per app, then awaits all detail calls together.
 # @name startFunctionAppDetails
 POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
 Content-Type: application/json
@@ -84,4 +56,6 @@ Content-Type: application/json
 }
 
 ### Status: Azure REST Function Apps detail fan-out
+# Run after `Start: Azure REST Function Apps detail fan-out`.
+# Expected: output.output is one detail object per Function App.
 GET {{startFunctionAppDetails.response.body.statusQueryGetUri}}

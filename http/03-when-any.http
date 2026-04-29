@@ -1,0 +1,30 @@
+# when_any activity-spec scenario
+#
+# Prereqs:
+# 1. Start Azurite and the Durable Task Scheduler emulator.
+# 2. Start the Functions host from this workspace: `source .venv/bin/activate && func start`.
+#
+# Important prototype note:
+# `when_any` is currently host-managed and accepts activity specs, not arbitrary awaitables.
+# Use this shape for now:
+#   await when_any([{ "activity": "echo", "input": {...} }, ...])
+# Natural syntax such as `when_any([call_activity(...), wait_for_external_event(...)])` is not implemented yet.
+
+@baseUrl = http://localhost:7071
+@orchestrator = monty_orchestrator
+
+### Start: when_any over activity specs
+# Run this to schedule two local echo activities and resolve with the first completed result.
+# @name startWhenAny
+POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
+Content-Type: application/json
+
+{
+  "code": "winner = await when_any([{\"activity\": \"echo\", \"input\": {\"i\": 1}}, {\"activity\": \"echo\", \"input\": {\"i\": 2}}])\nwinner"
+}
+
+### Status: when_any over activity specs
+# Run after `Start: when_any over activity specs`.
+# Expected: output.output has an index and result for the first completed activity.
+# Loser activities are not canceled in this prototype.
+GET {{startWhenAny.response.body.statusQueryGetUri}}

@@ -1,0 +1,90 @@
+# External event and human approval scenarios
+#
+# Prereqs:
+# 1. Start Azurite and the Durable Task Scheduler emulator.
+# 2. Start the Functions host from this workspace: `source .venv/bin/activate && func start`.
+# 3. For the human approval Azure scenario, run `az login` and make sure `@subscriptionId` is set below.
+#
+# How to use this file:
+# - For each scenario, run the Start request first.
+# - Then run the waiting Status request to confirm the orchestration is Running.
+# - Then run the Raise request to send the external event.
+# - Finally run the after-event Status request to see the completed output.
+
+@baseUrl = http://localhost:7071
+@orchestrator = monty_orchestrator
+@subscriptionId = ef6e1243-d48a-417e-8e6d-40cd96e110fd
+
+### Start: simple wait_for_external_event
+# Run this first for the smallest external-event smoke test.
+# The orchestration will stay Running until an Approval event is raised.
+# @name startExternalEvent
+POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
+Content-Type: application/json
+
+{
+  "code": "event = await wait_for_external_event(\"Approval\")\nevent"
+}
+
+### Status: simple external event before raise
+# Run after `Start: simple wait_for_external_event`.
+# Expected: runtimeStatus is Running and output is null.
+GET {{startExternalEvent.response.body.statusQueryGetUri}}
+
+### Raise: simple Approval event
+# Run after the status request shows the orchestration is waiting.
+# This uses the helper route in function_app.py; the built-in sendEventPostUri also works.
+POST {{baseUrl}}/api/orchestrations/{{startExternalEvent.response.body.id}}/events/Approval
+Content-Type: application/json
+
+{
+  "approved": true,
+  "reviewer": "local-test"
+}
+
+### Status: simple external event after raise
+# Run after `Raise: simple Approval event`.
+# Expected: runtimeStatus is Completed and output.output contains the approval payload.
+GET {{startExternalEvent.response.body.statusQueryGetUri}}
+
+### Start: human approval for Azure Function App inventory
+# Run this for a richer workflow:
+# 1. The orchestration lists up to 20 Function Apps with the read-only `azure_rest` activity.
+# 2. It pauses on `wait_for_external_event("Approval")`.
+# 3. If approved, it fans out detail calls with `when_all`.
+# 4. If rejected, it returns the decision and does not fetch detail records.
+# @name startHumanApproval
+POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
+Content-Type: application/json
+
+{
+  "code": "apps = await call_activity(\"azure_rest\", {\"path\": \"/subscriptions/{{subscriptionId}}/resources?api-version=2021-04-01\", \"query\": \"value[?type=='Microsoft.Web/sites' && contains(kind, 'functionapp')]|[0:20].{name:name, id:id, resourceGroup:resourceGroup, location:location, kind:kind}\"})\napproval = await wait_for_external_event(\"Approval\")\nif approval[\"approved\"]:\n    tasks = [call_activity(\"azure_rest\", {\"path\": app[\"id\"] + \"?api-version=2022-03-01\", \"query\": \"{name:name, resourceGroup:resourceGroup, location:location, state:properties.state, defaultHostName:properties.defaultHostName, httpsOnly:properties.httpsOnly, kind:kind}\"}) for app in apps]\n    details = await when_all(tasks)\n    result = {\"decision\": \"approved\", \"approval\": approval, \"reviewedFunctionApps\": apps, \"details\": details}\nelse:\n    result = {\"decision\": \"rejected\", \"approval\": approval, \"reviewedFunctionApps\": apps}\nresult"
+}
+
+### Status: human approval waiting for reviewer
+# Run after `Start: human approval for Azure Function App inventory`.
+# Expected: runtimeStatus is Running after the initial Azure REST activity completes.
+# `showHistoryOutput=true` lets you inspect the Function App list before approving.
+GET {{startHumanApproval.response.body.statusQueryGetUri}}&showHistory=true&showHistoryOutput=true
+
+# End of external event scenarios.
+
+
+### Raise: human approval decision
+# Run after reviewing the waiting status/history output.
+# To test rejection, start a fresh orchestration and change approved to false before raising the event.
+POST {{baseUrl}}/api/orchestrations/{{startHumanApproval.response.body.id}}/events/Approval
+Content-Type: application/json
+
+{
+  "approved": true,
+  "reviewer": "local-test",
+  "reason": "Inventory looks safe to enrich with read-only detail calls.",
+  "ticket": "CHG-4242"
+}
+
+### Status: human approval after decision
+# Run after `Raise: human approval decision`.
+# Expected when approved: Completed output with decision, approval payload, reviewedFunctionApps, and details.
+# Expected when rejected: Completed output with decision, approval payload, and reviewedFunctionApps only.
+GET {{startHumanApproval.response.body.statusQueryGetUri}}&showHistory=true&showHistoryOutput=true

@@ -18,6 +18,9 @@ class FakeDurableContext:
     def call_activity(self, name: str, payload: Any = None) -> FakeTask:
         return FakeTask("activity", name, payload)
 
+    def wait_for_external_event(self, name: str) -> FakeTask:
+        return FakeTask("event", name)
+
     def task_all(self, tasks: list[FakeTask]) -> FakeTask:
         return FakeTask("all", payload=tasks)
 
@@ -66,6 +69,58 @@ class MontyBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "not allowed"):
             drive('await call_activity("not_allowed", {})')
 
+    def test_await_wait_for_external_event(self) -> None:
+        result = drive('event = await wait_for_external_event("Approval")\nevent')
+
+        self.assertEqual(result["output"], {"event": "Approval", "payload": {"approved": True}})
+        self.assertEqual(result["metadata"]["scheduledActivities"], 0)
+
+    def test_wait_for_external_event_accepts_name_keyword(self) -> None:
+        result = drive('await wait_for_external_event(name="Approval")')
+
+        self.assertEqual(result["output"], {"event": "Approval", "payload": {"approved": True}})
+
+    def test_wait_for_external_event_normalizes_json_payload_text(self) -> None:
+        result = drive('await wait_for_external_event("JsonStringPayload")')
+
+        self.assertEqual(result["output"], {"approved": True, "reviewer": "fake-runtime"})
+
+    def test_wait_for_external_event_rejects_invalid_name(self) -> None:
+        with self.assertRaisesRegex(Exception, "non-empty string"):
+            drive("await wait_for_external_event(42)")
+
+    def test_wait_for_external_event_rejects_unexpected_keyword(self) -> None:
+        with self.assertRaisesRegex(Exception, "Unsupported wait_for_external_event keyword"):
+            drive('await wait_for_external_event(event="Approval")')
+
+    def test_when_all_can_wait_for_multiple_external_events(self) -> None:
+        result = drive(
+            'events = [wait_for_external_event("Approval"), wait_for_external_event("Escalation")]\n'
+            "await when_all(events)"
+        )
+
+        self.assertEqual(
+            result["output"],
+            [
+                {"event": "Approval", "payload": {"approved": True}},
+                {"event": "Escalation", "payload": {"approved": True}},
+            ],
+        )
+
+    def test_when_all_can_wait_for_activity_and_external_event(self) -> None:
+        result = drive(
+            'tasks = [call_activity("echo", {"i": 1}), wait_for_external_event("Approval")]\n'
+            "await when_all(tasks)"
+        )
+
+        self.assertEqual(
+            result["output"],
+            [
+                {"activity": "echo", "input": {"i": 1}},
+                {"event": "Approval", "payload": {"approved": True}},
+            ],
+        )
+
 
 def drive(code: str) -> dict[str, Any]:
     context = FakeDurableContext()
@@ -82,6 +137,10 @@ def drive(code: str) -> dict[str, Any]:
 def resolve_fake_task(task: FakeTask) -> Any:
     if task.kind == "activity":
         return {"activity": task.name, "input": task.payload}
+    if task.kind == "event":
+        if task.name == "JsonStringPayload":
+            return '{"approved": true, "reviewer": "fake-runtime"}'
+        return {"event": task.name, "payload": {"approved": True}}
     if task.kind == "all":
         return [resolve_fake_task(child_task) for child_task in task.payload]
     if task.kind == "any":

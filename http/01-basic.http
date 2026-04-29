@@ -1,0 +1,57 @@
+# Basic Monty orchestration scenarios
+#
+# Prereqs:
+# 1. Start Azurite and the Durable Task Scheduler emulator.
+# 2. Start the Functions host from this workspace: `source .venv/bin/activate && func start`.
+# 3. Run each "Start" request, then run its matching "Status" request.
+#
+# These examples do not require Azure login. They only use pure Monty code and the local `echo` activity.
+
+@baseUrl = http://localhost:7071
+@orchestrator = monty_orchestrator
+
+### Start: pure Monty code
+# Run this first. It proves the orchestrator can execute a Python code string in Monty.
+# @name startPure
+POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
+Content-Type: application/json
+
+{
+  "code": "1 + 2"
+}
+
+### Status: pure Monty code
+# Run after `Start: pure Monty code`.
+# Expected: runtimeStatus is Completed and output.output is 3.
+GET {{startPure.response.body.statusQueryGetUri}}
+
+### Start: await call_activity("echo", ...)
+# Run this to prove Monty can call out to a Durable activity and await its result.
+# @name startEcho
+POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
+Content-Type: application/json
+
+{
+  "code": "result = await call_activity(\"echo\", {\"hello\": \"durable\"})\nresult"
+}
+
+### Status: echo activity
+# Run after `Start: await call_activity("echo", ...)`.
+# Expected: output.output is {"hello":"durable"} and metadata.scheduledActivities is 1.
+GET {{startEcho.response.body.statusQueryGetUri}}
+
+### Start: rejected activity smoke test
+# Run this to see the allowlist fail closed.
+# The bridge only allows known activities such as `echo` and `azure_rest`.
+# @name startRejectedActivity
+POST {{baseUrl}}/api/orchestrators/{{orchestrator}}
+Content-Type: application/json
+
+{
+  "code": "await call_activity(\"not_allowed\", {})"
+}
+
+### Status: rejected activity smoke test
+# Run after `Start: rejected activity smoke test`.
+# Expected: the orchestration fails with an error saying the activity is not allowed.
+GET {{startRejectedActivity.response.body.statusQueryGetUri}}

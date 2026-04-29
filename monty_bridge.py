@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,6 +32,12 @@ class ActivityWork:
 
 
 @dataclass(frozen=True)
+class ExternalEventWork:
+    event_name: str
+    task: Any
+
+
+@dataclass(frozen=True)
 class WhenAnyWork:
     specs: list[ActivitySpec]
     tasks: list[Any]
@@ -44,7 +51,7 @@ def run_monty_orchestration(context: Any, code: str):
 class MontyDurableBridge:
     def __init__(self, context: Any):
         self.context = context
-        self.pending_work: dict[int, ActivityWork | WhenAnyWork] = {}
+        self.pending_work: dict[int, ActivityWork | ExternalEventWork | WhenAnyWork] = {}
         self.print_chunks: list[str] = []
         self.print_truncated = False
         self.scheduled_activity_count = 0
@@ -81,6 +88,8 @@ class MontyDurableBridge:
         function_name = str(snapshot.function_name)
         if function_name == "call_activity":
             return self._schedule_call_activity(snapshot)
+        if function_name == "wait_for_external_event":
+            return self._schedule_wait_for_external_event(snapshot)
         if function_name == "when_any":
             return self._schedule_when_any(snapshot)
 
@@ -97,6 +106,16 @@ class MontyDurableBridge:
             task = self.context.call_activity(spec.name, spec.payload)
             self.pending_work[int(snapshot.call_id)] = ActivityWork(spec=spec, task=task)
             self.scheduled_activity_count += 1
+        except Exception as exc:
+            return snapshot.resume(_external_error(exc))
+
+        return snapshot.resume({"future": ...})
+
+    def _schedule_wait_for_external_event(self, snapshot: FunctionSnapshot) -> Any:
+        try:
+            event_name = _parse_external_event_call(snapshot.args, snapshot.kwargs)
+            task = self.context.wait_for_external_event(event_name)
+            self.pending_work[int(snapshot.call_id)] = ExternalEventWork(event_name=event_name, task=task)
         except Exception as exc:
             return snapshot.resume(_external_error(exc))
 
@@ -123,18 +142,18 @@ class MontyDurableBridge:
             raise RuntimeError(f"Monty requested unknown future call IDs: {missing_call_ids}")
 
         work_items = [self.pending_work[call_id] for call_id in pending_call_ids]
-        if all(isinstance(work_item, ActivityWork) for work_item in work_items):
-            return (yield from self._resume_activity_futures(snapshot, pending_call_ids, work_items))
+        if all(_is_single_task_work(work_item) for work_item in work_items):
+            return (yield from self._resume_single_task_futures(snapshot, pending_call_ids, work_items))
 
         return (yield from self._resume_single_future(snapshot, pending_call_ids[0]))
 
-    def _resume_activity_futures(
+    def _resume_single_task_futures(
         self,
         snapshot: FutureSnapshot,
         call_ids: list[int],
-        work_items: list[ActivityWork | WhenAnyWork],
+        work_items: list[ActivityWork | ExternalEventWork | WhenAnyWork],
     ):
-        tasks = [work_item.task for work_item in work_items if isinstance(work_item, ActivityWork)]
+        tasks = [work_item.task for work_item in work_items if _is_single_task_work(work_item)]
         try:
             if len(tasks) == 1:
                 single_result = yield tasks[0]
@@ -145,8 +164,8 @@ class MontyDurableBridge:
             resume_results = {call_id: _external_error(exc) for call_id in call_ids}
         else:
             resume_results = {
-                call_id: {"return_value": _ensure_json_value(result)}
-                for call_id, result in zip(call_ids, results, strict=True)
+                call_id: {"return_value": _result_for_single_task(work_item, result)}
+                for call_id, work_item, result in zip(call_ids, work_items, results, strict=True)
             }
 
         for call_id in call_ids:
@@ -155,13 +174,13 @@ class MontyDurableBridge:
 
     def _resume_single_future(self, snapshot: FutureSnapshot, call_id: int):
         work_item = self.pending_work[call_id]
-        if isinstance(work_item, ActivityWork):
+        if _is_single_task_work(work_item):
             try:
                 result = yield work_item.task
             except Exception as exc:
                 resume_result = _external_error(exc)
             else:
-                resume_result = {"return_value": _ensure_json_value(result)}
+                resume_result = {"return_value": _result_for_single_task(work_item, result)}
         elif isinstance(work_item, WhenAnyWork):
             try:
                 winner_task = yield self.context.task_any(work_item.tasks)
@@ -237,6 +256,28 @@ def _parse_activity_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Activ
     return _activity_spec(name, payload)
 
 
+def _parse_external_event_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    if len(args) > 1:
+        raise ValueError("wait_for_external_event accepts one positional argument: name.")
+
+    unexpected_kwargs = set(kwargs) - {"name"}
+    if unexpected_kwargs:
+        raise ValueError(f"Unsupported wait_for_external_event keyword arguments: {sorted(unexpected_kwargs)}")
+
+    if args:
+        if "name" in kwargs:
+            raise ValueError("wait_for_external_event name was provided twice.")
+        event_name = args[0]
+    elif "name" in kwargs:
+        event_name = kwargs["name"]
+    else:
+        raise ValueError("wait_for_external_event requires an event name.")
+
+    if not isinstance(event_name, str) or not event_name:
+        raise ValueError("External event name must be a non-empty string.")
+    return event_name
+
+
 def _parse_when_any_specs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[ActivitySpec]:
     if kwargs:
         unexpected_kwargs = set(kwargs) - {"activities"}
@@ -292,6 +333,25 @@ def _ensure_json_value(value: Any) -> Any:
 
 def _external_error(exc: Exception) -> dict[str, str]:
     return {"exc_type": type(exc).__name__, "message": str(exc)}
+
+
+def _result_for_single_task(work_item: ActivityWork | ExternalEventWork | WhenAnyWork, result: Any) -> Any:
+    if isinstance(work_item, ExternalEventWork):
+        return _ensure_json_value(_normalize_external_event_payload(result))
+    return _ensure_json_value(result)
+
+
+def _normalize_external_event_payload(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _is_single_task_work(work_item: Any) -> bool:
+    return isinstance(work_item, (ActivityWork, ExternalEventWork))
 
 
 def _find_task_index(tasks: list[Any], winner_task: Any) -> int:
