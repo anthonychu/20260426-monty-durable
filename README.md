@@ -50,7 +50,7 @@ These are features we have not implemented yet, not inherent limitations of the 
 
 ## Local Setup
 
-Create the local backend service containers the first time:
+Create and start the local backend service containers:
 
 ```bash
 docker run -d \
@@ -66,12 +66,6 @@ docker run -d \
   -p 8080:8080 \
   -p 8082:8082 \
   mcr.microsoft.com/dts/dts-emulator:latest
-```
-
-After the containers exist, start them with:
-
-```bash
-docker start azurite monty-dts-emulator
 ```
 
 Start the Functions host from this workspace:
