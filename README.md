@@ -50,7 +50,25 @@ These are features we have not implemented yet, not inherent limitations of the 
 
 ## Local Setup
 
-Start the local backend services:
+Create the local backend service containers the first time:
+
+```bash
+docker run -d \
+  --name azurite \
+  -p 10000:10000 \
+  -p 10001:10001 \
+  -p 10002:10002 \
+  mcr.microsoft.com/azure-storage/azurite \
+  azurite --skipApiVersionCheck --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+
+docker run -d \
+  --name monty-dts-emulator \
+  -p 8080:8080 \
+  -p 8082:8082 \
+  mcr.microsoft.com/dts/dts-emulator:latest
+```
+
+After the containers exist, start them with:
 
 ```bash
 docker start azurite monty-dts-emulator
